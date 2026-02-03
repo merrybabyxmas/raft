@@ -1,6 +1,6 @@
 from data_provider.data_factory import data_provider
 from exp.exp_basic import Exp_Basic
-from utils.tools import EarlyStopping, adjust_learning_rate, visual
+from utils.tools import EarlyStopping, adjust_learning_rate, visual, visual_with_retrieval, save_metadata
 from utils.metrics import metric
 import torch
 import torch.nn as nn
@@ -61,7 +61,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
                 # encoder - decoder
-                if self.args.model == 'RAFT':
+                if self.args.model == 'RAFT' or self.args.model == 'D_RAFT':
                     outputs = self.model(batch_x, index, mode='valid')
                 else:
                     if self.args.use_amp:
@@ -92,6 +92,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         path = os.path.join(self.args.checkpoints, setting)
         if not os.path.exists(path):
             os.makedirs(path)
+
+        # Save experiment metadata
+        save_metadata(self.args, path)
+
+        # Create visualization folder for training
+        train_vis_path = os.path.join(path, 'train_visualizations')
+        if not os.path.exists(train_vis_path):
+            os.makedirs(train_vis_path)
 
         time_now = time.time()
 
@@ -126,8 +134,24 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
                 # encoder - decoder
-                if self.args.model == 'RAFT':
-                    outputs = self.model(batch_x, index, mode='train')
+                if self.args.model == 'RAFT' or self.args.model == 'D_RAFT':
+                    # Get outputs with retrieved patterns for visualization
+                    if i == 0:  # Visualize first batch of each epoch
+                        outputs, retrieved_input, retrieved_output = self.model(
+                            batch_x, index, mode='train', return_patterns=True
+                        )
+                        # Visualize first sample in batch
+                        input_np = batch_x[0].detach().cpu().numpy()
+                        true_np = batch_y[0, -self.args.pred_len:, :].detach().cpu().numpy()
+                        pred_np = outputs[0].detach().cpu().numpy()
+                        ret_input_np = retrieved_input[0].detach().cpu().numpy()
+                        ret_output_np = retrieved_output[0].detach().cpu().numpy()
+
+                        vis_name = os.path.join(train_vis_path, f'train_epoch_{epoch+1}_batch_{i}.png')
+                        visual_with_retrieval(input_np, true_np, pred_np,
+                                            ret_input_np, ret_output_np, name=vis_name)
+                    else:
+                        outputs = self.model(batch_x, index, mode='train')
                 else:
                     if self.args.use_amp:
                         with torch.cuda.amp.autocast():
@@ -135,11 +159,27 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     else:
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
 
+                f_pred, g_pred, patterns = self.model(batch_x, index, mode='train')
+                
                 f_dim = -1 if self.args.features == 'MS' else 0
-                outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                loss = criterion(outputs, batch_y)
-                train_loss.append(loss.item())
+                # exp/exp_long_term_forecasting.py 내 train 함수 내부
+
+                # Forward
+                f_pred, g_pred, patterns = self.model(batch_x, index, mode='train')
+
+                # Loss 계산
+                # 1. Main Network (F)는 평소처럼 MSE 학습
+                loss_f = criterion(f_pred, batch_y)
+
+                # 2. Residual Network (G)는 "비율"을 학습
+                # target_g = (실제값 / F의 예측값) - 1
+                # 분모가 0이 되는 것을 방지하기 위해 eps(1e-5) 추가
+                eps = 1e-5
+                target_g = (batch_y / (f_pred.detach() + eps)) - 1
+                loss_g = criterion(g_pred, target_g)
+
+                # 최종 학습
+                loss = loss_f + loss_g
 
                 if (i + 1) % 100 == 0:
                     print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
@@ -191,6 +231,11 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
+        # Create retrieval visualization folder
+        retrieval_vis_path = os.path.join(folder_path, 'retrieval_visualizations')
+        if not os.path.exists(retrieval_vis_path):
+            os.makedirs(retrieval_vis_path)
+
         self.model.eval()
         with torch.no_grad():
             for i, (index, batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(test_loader):
@@ -204,8 +249,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
                 # encoder - decoder
-                if self.args.model == 'RAFT':
-                    outputs = self.model(batch_x, index, mode='test')
+                if self.args.model == 'RAFT' or self.args.model == 'D_RAFT':
+                    # Get outputs with retrieved patterns for visualization
+                    if i % 20 == 0:
+                        outputs, retrieved_input, retrieved_output = self.model(
+                            batch_x, index, mode='test', return_patterns=True
+                        )
+                    else:
+                        outputs = self.model(batch_x, index, mode='test')
                 else:
                     if self.args.use_amp:
                         with torch.cuda.amp.autocast():
@@ -216,29 +267,37 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, :]
                 batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)
-                outputs = outputs.detach().cpu().numpy()
-                batch_y = batch_y.detach().cpu().numpy()
+                outputs_np = outputs.detach().cpu().numpy()
+                batch_y_np = batch_y.detach().cpu().numpy()
                 if test_data.scale and self.args.inverse:
-                    shape = outputs.shape
-                    outputs = test_data.inverse_transform(outputs.reshape(shape[0] * shape[1], -1)).reshape(shape)
-                    batch_y = test_data.inverse_transform(batch_y.reshape(shape[0] * shape[1], -1)).reshape(shape)
-        
-                outputs = outputs[:, :, f_dim:]
-                batch_y = batch_y[:, :, f_dim:]
+                    shape = outputs_np.shape
+                    outputs_np = test_data.inverse_transform(outputs_np.reshape(shape[0] * shape[1], -1)).reshape(shape)
+                    batch_y_np = test_data.inverse_transform(batch_y_np.reshape(shape[0] * shape[1], -1)).reshape(shape)
 
-                pred = outputs
-                true = batch_y
+                outputs_np = outputs_np[:, :, f_dim:]
+                batch_y_np = batch_y_np[:, :, f_dim:]
+
+                pred = outputs_np
+                true = batch_y_np
 
                 preds.append(pred)
                 trues.append(true)
                 if i % 20 == 0:
-                    input = batch_x.detach().cpu().numpy()
+                    input_np = batch_x.detach().cpu().numpy()
                     if test_data.scale and self.args.inverse:
-                        shape = input.shape
-                        input = test_data.inverse_transform(input.reshape(shape[0] * shape[1], -1)).reshape(shape)
-                    gt = np.concatenate((input[0, :, -1], true[0, :, -1]), axis=0)
-                    pd = np.concatenate((input[0, :, -1], pred[0, :, -1]), axis=0)
-                    visual(gt, pd, os.path.join(folder_path, str(i) + '.pdf'))
+                        shape = input_np.shape
+                        input_np = test_data.inverse_transform(input_np.reshape(shape[0] * shape[1], -1)).reshape(shape)
+                    gt = np.concatenate((input_np[0, :, -1], true[0, :, -1]), axis=0)
+                    pd_vis = np.concatenate((input_np[0, :, -1], pred[0, :, -1]), axis=0)
+                    visual(gt, pd_vis, os.path.join(folder_path, str(i) + '.png'))
+
+                    # Save retrieval visualization for RAFT models
+                    if self.args.model == 'RAFT' or self.args.model == 'D_RAFT':
+                        ret_input_np = retrieved_input[0].detach().cpu().numpy()
+                        ret_output_np = retrieved_output[0].detach().cpu().numpy()
+                        vis_name = os.path.join(retrieval_vis_path, f'eval_sample_{i}.png')
+                        visual_with_retrieval(input_np[0], true[0], pred[0],
+                                            ret_input_np, ret_output_np, name=vis_name)
 
         preds = np.concatenate(preds, axis=0)
         trues = np.concatenate(trues, axis=0)

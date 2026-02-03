@@ -106,59 +106,76 @@ class RetrievalTool():
         
         return sim
         
-    def retrieve(self, x, index, train=True):
+    def retrieve(self, x, index, train=True, return_patterns=False):
         index = index.to(x.device)
-        
+
         bsz, seq_len, channels = x.shape
         assert(seq_len == self.seq_len, channels == self.channels)
-        
+
         x_mg, mg_offset = self.decompose_mg(x) # G, B, S, C
 
         sim = self.periodic_batch_corr(
             self.train_data_all_mg.flatten(start_dim=2), # G, T, S * C
             x_mg.flatten(start_dim=2), # G, B, S * C
         ) # G, B, T
-            
+
         if train:
             sliding_index = torch.arange(2 * (self.seq_len + self.pred_len) - 1).to(x.device)
             sliding_index = sliding_index.unsqueeze(dim=0).repeat(len(index), 1)
             sliding_index = sliding_index + (index - self.seq_len - self.pred_len + 1).unsqueeze(dim=1)
-            
+
             sliding_index = torch.where(sliding_index >= 0, sliding_index, 0)
             sliding_index = torch.where(sliding_index < self.n_train, sliding_index, self.n_train - 1)
 
             self_mask = torch.zeros((bsz, self.n_train)).to(x.device)
             self_mask = self_mask.scatter_(1, sliding_index, 1.)
             self_mask = self_mask.unsqueeze(dim=0).repeat(self.n_period, 1, 1)
-            
+
             sim = sim.masked_fill_(self_mask.bool(), float('-inf')) # G, B, T
 
         sim = sim.reshape(self.n_period * bsz, self.n_train) # G X B, T
-                
+
         topm_index = torch.topk(sim, self.topm, dim=1).indices
         ranking_sim = torch.ones_like(sim) * float('-inf')
-        
+
         rows = torch.arange(sim.size(0)).unsqueeze(-1).to(sim.device)
         ranking_sim[rows, topm_index] = sim[rows, topm_index]
-        
+
         sim = sim.reshape(self.n_period, bsz, self.n_train) # G, B, T
         ranking_sim = ranking_sim.reshape(self.n_period, bsz, self.n_train) # G, B, T
+        topm_index = topm_index.reshape(self.n_period, bsz, self.topm) # G, B, M
 
         data_len, seq_len, channels = self.train_data_all.shape
-            
+
         ranking_prob = F.softmax(ranking_sim / self.temperature, dim=2)
         ranking_prob = ranking_prob.detach().cpu() # G, B, T
-        
+
         y_data_all = self.y_data_all_mg.flatten(start_dim=2) # G, T, P * C
-        
+
         pred_from_retrieval = torch.bmm(ranking_prob, y_data_all).reshape(self.n_period, bsz, -1, channels)
         pred_from_retrieval = pred_from_retrieval.to(x.device)
-        
+
+        if return_patterns:
+            # Extract top-M retrieved patterns (input sequences)
+            # topm_index: G, B, M -> use first period group's indices
+            first_period_indices = topm_index[0]  # B, M
+            retrieved_input_patterns = []
+            retrieved_output_patterns = []
+            for b in range(bsz):
+                indices = first_period_indices[b].cpu()  # M
+                input_patterns = self.train_data_all[indices]  # M, S, C
+                output_patterns = self.y_data_all[indices]  # M, P, C
+                retrieved_input_patterns.append(input_patterns)
+                retrieved_output_patterns.append(output_patterns)
+            retrieved_input_patterns = torch.stack(retrieved_input_patterns, dim=0)  # B, M, S, C
+            retrieved_output_patterns = torch.stack(retrieved_output_patterns, dim=0)  # B, M, P, C
+            return pred_from_retrieval, retrieved_input_patterns, retrieved_output_patterns
+
         return pred_from_retrieval
     
     def retrieve_all(self, data, train=False, device=torch.device('cpu')):
         assert(self.train_data_all_mg != None)
-        
+
         rt_loader = DataLoader(
             data,
             batch_size=1024,
@@ -166,14 +183,97 @@ class RetrievalTool():
             num_workers=8,
             drop_last=False
         )
-        
+
         retrievals = []
         with torch.no_grad():
             for index, batch_x, batch_y, batch_x_mark, batch_y_mark in tqdm(rt_loader):
                 pred_from_retrieval = self.retrieve(batch_x.float().to(device), index, train=train)
                 pred_from_retrieval = pred_from_retrieval.cpu()
                 retrievals.append(pred_from_retrieval)
-                
+
         retrievals = torch.cat(retrievals, dim=1)
-        
+
         return retrievals
+
+    def retrieve_with_indices(self, x, index, train=True):
+        """Retrieve predictions and return top-M indices for visualization."""
+        index = index.to(x.device)
+
+        bsz, seq_len, channels = x.shape
+        assert(seq_len == self.seq_len, channels == self.channels)
+
+        x_mg, mg_offset = self.decompose_mg(x) # G, B, S, C
+
+        sim = self.periodic_batch_corr(
+            self.train_data_all_mg.flatten(start_dim=2), # G, T, S * C
+            x_mg.flatten(start_dim=2), # G, B, S * C
+        ) # G, B, T
+
+        if train:
+            sliding_index = torch.arange(2 * (self.seq_len + self.pred_len) - 1).to(x.device)
+            sliding_index = sliding_index.unsqueeze(dim=0).repeat(len(index), 1)
+            sliding_index = sliding_index + (index - self.seq_len - self.pred_len + 1).unsqueeze(dim=1)
+
+            sliding_index = torch.where(sliding_index >= 0, sliding_index, 0)
+            sliding_index = torch.where(sliding_index < self.n_train, sliding_index, self.n_train - 1)
+
+            self_mask = torch.zeros((bsz, self.n_train)).to(x.device)
+            self_mask = self_mask.scatter_(1, sliding_index, 1.)
+            self_mask = self_mask.unsqueeze(dim=0).repeat(self.n_period, 1, 1)
+
+            sim = sim.masked_fill_(self_mask.bool(), float('-inf')) # G, B, T
+
+        sim = sim.reshape(self.n_period * bsz, self.n_train) # G X B, T
+
+        topm_index = torch.topk(sim, self.topm, dim=1).indices
+        ranking_sim = torch.ones_like(sim) * float('-inf')
+
+        rows = torch.arange(sim.size(0)).unsqueeze(-1).to(sim.device)
+        ranking_sim[rows, topm_index] = sim[rows, topm_index]
+
+        sim = sim.reshape(self.n_period, bsz, self.n_train) # G, B, T
+        ranking_sim = ranking_sim.reshape(self.n_period, bsz, self.n_train) # G, B, T
+        topm_index_reshaped = topm_index.reshape(self.n_period, bsz, self.topm) # G, B, M
+
+        data_len, seq_len, channels = self.train_data_all.shape
+
+        ranking_prob = F.softmax(ranking_sim / self.temperature, dim=2)
+        ranking_prob = ranking_prob.detach().cpu() # G, B, T
+
+        y_data_all = self.y_data_all_mg.flatten(start_dim=2) # G, T, P * C
+
+        pred_from_retrieval = torch.bmm(ranking_prob, y_data_all).reshape(self.n_period, bsz, -1, channels)
+        pred_from_retrieval = pred_from_retrieval.to(x.device)
+
+        # Return first period's top-M indices for visualization (B, M)
+        first_period_indices = topm_index_reshaped[0].cpu()  # B, M
+
+        return pred_from_retrieval, first_period_indices
+
+    def retrieve_all_with_indices(self, data, train=False, device=torch.device('cpu')):
+        """Retrieve all predictions with top-M indices for visualization."""
+        assert(self.train_data_all_mg != None)
+
+        rt_loader = DataLoader(
+            data,
+            batch_size=1024,
+            shuffle=False,
+            num_workers=8,
+            drop_last=False
+        )
+
+        retrievals = []
+        all_indices = []
+        with torch.no_grad():
+            for index, batch_x, batch_y, batch_x_mark, batch_y_mark in tqdm(rt_loader):
+                pred_from_retrieval, topm_indices = self.retrieve_with_indices(
+                    batch_x.float().to(device), index, train=train
+                )
+                pred_from_retrieval = pred_from_retrieval.cpu()
+                retrievals.append(pred_from_retrieval)
+                all_indices.append(topm_indices)
+
+        retrievals = torch.cat(retrievals, dim=1)
+        all_indices = torch.cat(all_indices, dim=0)  # N, M
+
+        return retrievals, all_indices
