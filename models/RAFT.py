@@ -26,8 +26,9 @@ class Model(nn.Module):
 #         self.individual = individual
         self.channels = configs.enc_in
         
+        # G(Residual Net) 입력: x_norm(Seq) + p_mean(Pred) + p_std(Pred) + f_pred(Pred)
         self.residual_net = nn.Sequential(
-            nn.Linear(self.seq_len + 2 * self.pred_len, 256),
+            nn.Linear(self.seq_len + 3 * self.pred_len, 256),
             nn.ReLU(),
             nn.Dropout(0.5),
             nn.Linear(256, self.pred_len),
@@ -134,41 +135,18 @@ class Model(nn.Module):
         return pred
 
     def forecast(self, x_enc, index, mode):
-        # Retrieve indices for the current batch
-        batch_indices = self.retrieval_indices_dict[mode][index.cpu()] # [B, M]
-
-        # Retrieve patterns (Targets) for statistics
-        # self.y_data_source is typically on CPU
-        patterns = self.y_data_source[batch_indices].to(self.device) # [B, M, Pred, C]
-        
-        # Calculate Statistics for G Network
-        p_mean = patterns.mean(dim=1) # [B, Pred, C]
-        p_std = patterns.std(dim=1)   # [B, Pred, C]
-
-        # G Network Input Construction
-        # x_enc: [B, Seq, C]
+        # 1. Main Network (F) 연산을 먼저 수행하여 베이스라인 생성
         x_offset = x_enc[:, -1:, :].detach()
-        x_norm = x_enc - x_offset
-
-        # Concatenate: x, p_mean, p_std along the sequence/time dimension (after permuting to [B, C, T])
-        g_input = torch.cat([
-            x_norm.permute(0, 2, 1),
-            p_mean.permute(0, 2, 1),
-            p_std.permute(0, 2, 1)
-        ], dim=-1) # [B, C, Seq + 2*Pred]
-
-        g_pred = self.residual_net(g_input).permute(0, 2, 1) # [B, Pred, C]
-
-        # F Network (Standard RAFT Logic)
-        x_pred_from_x = self.linear_x(x_norm.permute(0, 2, 1)).permute(0, 2, 1)
+        x_norm = x_enc - x_offset # [B, Seq, C]
         
-        pred_from_retrieval = self.retrieval_dict[mode][:, index.cpu()].to(self.device) # [G, B, Pred, C]
-
+        # F의 예측 로직 (기존 RAFT 로직)
+        x_pred_from_x = self.linear_x(x_norm.permute(0, 2, 1)).permute(0, 2, 1)
+        pred_from_retrieval = self.retrieval_dict[mode][:, index.cpu()].to(self.device)
+        
         bsz = x_enc.shape[0]
         retrieval_pred_list = []
         for i, pr in enumerate(pred_from_retrieval):
              g_period = self.period_num[i]
-
              pr = pr.reshape(bsz, self.pred_len // g_period, g_period, self.channels)
              pr = pr[:, :, 0, :]
              pr = self.retrieval_pred[i](pr.permute(0, 2, 1)).permute(0, 2, 1)
@@ -176,10 +154,28 @@ class Model(nn.Module):
              retrieval_pred_list.append(pr)
 
         retrieval_pred_list = torch.stack(retrieval_pred_list, dim=1).sum(dim=1)
-        
         pred_combined = torch.cat([x_pred_from_x, retrieval_pred_list], dim=1)
-        f_pred = self.linear_pred(pred_combined.permute(0, 2, 1)).permute(0, 2, 1).reshape(bsz, self.pred_len, self.channels)
-        f_pred = f_pred + x_offset
+        
+        # F의 정규화된 예측값 (G의 입력으로 사용됨)
+        f_pred_norm = self.linear_pred(pred_combined.permute(0, 2, 1)).permute(0, 2, 1).reshape(bsz, self.pred_len, self.channels)
+        f_pred = f_pred_norm + x_offset
+
+        # 2. 검색 패턴 및 통계량 획득
+        batch_indices = self.retrieval_indices_dict[mode][index.cpu()]
+        patterns = self.y_data_source[batch_indices].to(self.device) # [B, M, Pred, C]
+        p_mean = patterns.mean(dim=1) 
+        p_std = patterns.std(dim=1)   
+
+        # 3. Residual Network (G) 계산: F의 결과를 입력에 포함!
+        # x_norm(Seq) + p_mean(Pred) + p_std(Pred) + f_pred_norm(Pred)
+        g_input = torch.cat([
+            x_norm.permute(0, 2, 1),
+            p_mean.permute(0, 2, 1),
+            p_std.permute(0, 2, 1),
+            f_pred_norm.detach().permute(0, 2, 1) # F의 예측을 끊어서(detach) 입력
+        ], dim=-1) # [B, C, Seq + 3*Pred]
+
+        g_pred = self.residual_net(g_input).permute(0, 2, 1) # [B, Pred, C]
 
         return f_pred, g_pred, patterns
 
@@ -205,6 +201,8 @@ class Model(nn.Module):
         if self.task_name == 'long_term_forecast':
             f_pred, g_pred, patterns = self.forecast(x_enc, index, mode)
 
+            scaling_factor = 0.1
+            g_pred = g_pred * scaling_factor
             # Apply Multiplicative Correction (F * (1 + G))
             if mode != 'train':
                 return f_pred * (1 + g_pred)
