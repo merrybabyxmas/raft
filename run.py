@@ -90,7 +90,7 @@ if __name__ == '__main__':
         help='Number of Periods'
     )
     parser.add_argument(
-        '--topm', type=int, default=20,
+        '--topm', type=int, default=1,
         help='Number of Retrievals'
     )
     parser.add_argument('--use_trust_gate', default=False, action='store_true',

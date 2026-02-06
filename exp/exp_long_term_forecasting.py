@@ -97,8 +97,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         # Save experiment metadata
         save_metadata(self.args, path)
 
-        # Create visualization folder for training
-        train_vis_path = os.path.join(path, 'train_visualizations')
+        # Create visualization folder for training (with timestamp subfolder)
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        train_vis_path = os.path.join(path, 'train_visualizations', ts)
         if not os.path.exists(train_vis_path):
             os.makedirs(train_vis_path)
 
@@ -150,8 +151,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         ret_input_np = ret_in[0].cpu().numpy()
                         ret_output_np = ret_out[0].cpu().numpy()
 
-                        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                        vis_name = os.path.join(train_vis_path, f'train_epoch_{epoch+1}_batch_{i}_{ts}.png')
+                        vis_name = os.path.join(train_vis_path, f'train_epoch_{epoch+1}_batch_{i}.png')
                         visual_with_retrieval(input_np, true_np, pred_np,
                                               ret_input_np, ret_output_np, name=vis_name)
 
@@ -190,8 +190,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         ret_input_np = retrieved_input[0].detach().cpu().numpy()
                         ret_output_np = retrieved_output[0].detach().cpu().numpy()
 
-                        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                        vis_name = os.path.join(train_vis_path, f'train_epoch_{epoch+1}_batch_{i}_{ts}.png')
+                        vis_name = os.path.join(train_vis_path, f'train_epoch_{epoch+1}_batch_{i}.png')
                         visual_with_retrieval(input_np, true_np, pred_np,
                                             ret_input_np, ret_output_np, name=vis_name)
                     else:
@@ -261,7 +260,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         preds = []
         trues = []
-        folder_path = './test_results/' + setting + '/'
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        folder_path = './test_results/' + setting + '/' + ts + '/'
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
@@ -323,14 +323,13 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         input_np = test_data.inverse_transform(input_np.reshape(shape[0] * shape[1], -1)).reshape(shape)
                     gt = np.concatenate((input_np[0, :, -1], true[0, :, -1]), axis=0)
                     pd_vis = np.concatenate((input_np[0, :, -1], pred[0, :, -1]), axis=0)
-                    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    visual(gt, pd_vis, os.path.join(folder_path, f'{i}_{ts}.png'))
+                    visual(gt, pd_vis, os.path.join(folder_path, f'{i}.png'))
 
                     # Save retrieval visualization for RAFT models
                     if self.args.model == 'RAFT' or self.args.model == 'D_RAFT':
                         ret_input_np = retrieved_input[0].detach().cpu().numpy()
                         ret_output_np = retrieved_output[0].detach().cpu().numpy()
-                        vis_name = os.path.join(retrieval_vis_path, f'eval_sample_{i}_{ts}.png')
+                        vis_name = os.path.join(retrieval_vis_path, f'eval_sample_{i}.png')
                         visual_with_retrieval(input_np[0], true[0], pred[0],
                                             ret_input_np, ret_output_np, name=vis_name)
 
