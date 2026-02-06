@@ -20,19 +20,23 @@ warnings.filterwarnings('ignore')
 class Exp_Long_Term_Forecast(Exp_Basic):
     def __init__(self, args):
         super(Exp_Long_Term_Forecast, self).__init__(args)
+        self.use_wandb = getattr(args, 'use_wandb', False)
+        if self.use_wandb:
+            import wandb
+            self.wandb = wandb
 
     def _build_model(self):
         model = self.model_dict[self.args.model].Model(self.args).float()
 
         if self.args.use_multi_gpu and self.args.use_gpu:
             model = nn.DataParallel(model, device_ids=self.args.device_ids)
-            
+
         train_data, train_loader = self._get_data(flag='train')
         vali_data, vali_loader = self._get_data(flag='val')
         test_data, test_loader = self._get_data(flag='test')
-        
+
         model.prepare_dataset(train_data, vali_data, test_data)
-        
+
         return model
 
     def _get_data(self, flag):
@@ -46,6 +50,34 @@ class Exp_Long_Term_Forecast(Exp_Basic):
     def _select_criterion(self):
         criterion = nn.MSELoss()
         return criterion
+
+    def _init_wandb(self, setting):
+        if not self.use_wandb:
+            return
+        config = vars(self.args).copy()
+        config['setting'] = setting
+        self.wandb.init(
+            project=self.args.wandb_project,
+            name=f"{self.args.model}_{self.args.data}_sl{self.args.seq_len}_pl{self.args.pred_len}",
+            config=config,
+            reinit=True,
+        )
+        # Log model parameter count
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        self.wandb.log({
+            'model/total_params': total_params,
+            'model/trainable_params': trainable_params,
+        })
+        print(f"[wandb] Total params: {total_params:,}, Trainable: {trainable_params:,}")
+
+    def _log_wandb(self, log_dict, step=None):
+        if not self.use_wandb:
+            return
+        if step is not None:
+            self.wandb.log(log_dict, step=step)
+        else:
+            self.wandb.log(log_dict)
 
     def vali(self, vali_data, vali_loader, criterion):
         total_loss = []
@@ -70,7 +102,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                     else:
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-                        
+
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
                 batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
@@ -103,10 +135,11 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         if not os.path.exists(train_vis_path):
             os.makedirs(train_vis_path)
 
-        time_now = time.time()
+        # Init wandb
+        self._init_wandb(setting)
 
+        time_now = time.time()
         train_steps = len(train_loader)
-#         early_stopping = EarlyStopping(patience=self.args.patience, verbose=True)
 
         model_optim = self._select_optimizer()
         criterion = self._select_criterion()
@@ -116,7 +149,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         best_valid_loss = float('inf')
         best_model = None
-            
+        global_step = 0
+
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_loss = []
@@ -125,6 +159,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             epoch_time = time.time()
             for i, (index, batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
                 iter_count += 1
+                global_step += 1
                 model_optim.zero_grad()
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
@@ -137,45 +172,63 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
                 # encoder - decoder
                 if self.args.model == 'RAFT':
-                    f_pred, g_pred, patterns = self.model(batch_x, index, mode='train', x_mark=batch_x_mark)
+                    # Diagnostic logging every 50 steps
+                    do_diag = (i % 50 == 0)
+                    if do_diag:
+                        f_pred, _, _, diag = self.model(batch_x, index, mode='train', return_diag=True)
+                    else:
+                        f_pred, _, _ = self.model(batch_x, index, mode='train')
 
                     # Train visualization (first batch of each epoch)
                     if i == 0:
                         with torch.no_grad():
                             batch_idx = self.model.retrieval_indices_dict['train'][index.cpu()]
-                            ret_in = self.model.x_data_source[batch_idx]   # [B, M, Seq, C]
-                            ret_out = self.model.y_data_source[batch_idx]  # [B, M, Pred, C]
+                            ret_in = self.model.x_data_source[batch_idx]
+                            ret_out = self.model.y_data_source[batch_idx]
                         input_np = batch_x[0].detach().cpu().numpy()
                         true_np = batch_y[0, -self.args.pred_len:, :].detach().cpu().numpy()
-                        pred_np = (f_pred[0] + g_pred[0]).detach().cpu().numpy()
+                        pred_np = f_pred[0].detach().cpu().numpy()
                         ret_input_np = ret_in[0].cpu().numpy()
                         ret_output_np = ret_out[0].cpu().numpy()
 
                         vis_name = os.path.join(train_vis_path, f'train_epoch_{epoch+1}_batch_{i}.png')
                         visual_with_retrieval(input_np, true_np, pred_np,
                                               ret_input_np, ret_output_np, name=vis_name)
+                        # Log image to wandb
+                        if self.use_wandb:
+                            self._log_wandb({
+                                'train/visualization': self.wandb.Image(vis_name),
+                            }, step=global_step)
 
                     f_dim = -1 if self.args.features == 'MS' else 0
                     f_pred = f_pred[:, -self.args.pred_len:, f_dim:]
-                    g_pred = g_pred[:, -self.args.pred_len:, f_dim:]
                     batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
 
-                    # Loss F: MSE (Base Net이 Y를 직접 예측)
-                    loss_f = criterion(f_pred, batch_y)
+                    loss = criterion(f_pred, batch_y)
 
-                    # Loss G: Additive Correction
-                    # G는 F가 놓친 잔차(Y - F)를 학습
-                    target_g = batch_y - f_pred.detach()
+                    # Wandb step-level logging
+                    if do_diag:
+                        step_log = {
+                            'train/step_loss': loss.item(),
+                            'quantum/logits_mean': diag['quantum/logits_mean'],
+                            'quantum/logits_std': diag['quantum/logits_std'],
+                            'quantum/exp_val_mean': diag['quantum/exp_val_mean'],
+                            'quantum/exp_val_std': diag['quantum/exp_val_std'],
+                            'quantum/soft_entropy': diag['quantum/soft_entropy'],
+                            'pred/base_pred_norm': diag['pred/base_pred_norm'],
+                            'pred/selected_pattern_norm': diag['pred/selected_pattern_norm'],
+                            'pred/combined_pred_norm': diag['pred/combined_pred_norm'],
+                            'pred/base_ratio': diag['pred/base_ratio'],
+                        }
+                        # Log per-pattern selection counts
+                        for pidx, cnt in enumerate(diag['quantum/pattern_counts']):
+                            step_log[f'quantum/pattern_{pidx}_count'] = cnt
+                        self._log_wandb(step_log, step=global_step)
 
-                    loss_g = criterion(g_pred, target_g)
-
-                    # 디버깅: G의 출력 범위와 target 범위 확인
-                    if (i + 1) % 100 == 0:
-                        print(f"\t[DEBUG] g_pred range: [{g_pred.min().item():.3f}, {g_pred.max().item():.3f}], "
-                              f"target_g range: [{target_g.min().item():.3f}, {target_g.max().item():.3f}]")
-                        print(f"\t[DEBUG] loss_f: {loss_f.item():.4f}, loss_g: {loss_g.item():.4f}")
-
-                    loss = loss_f + loss_g
+                        print(f"\t[step {global_step}] loss: {loss.item():.4f} | "
+                              f"q_entropy: {diag['quantum/soft_entropy']:.3f} | "
+                              f"base_ratio: {diag['pred/base_ratio']:.3f} | "
+                              f"pattern_counts: {diag['quantum/pattern_counts']}")
 
                 elif self.args.model == 'D_RAFT':
                     # Get outputs with retrieved patterns for visualization
@@ -228,9 +281,12 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     scaler.update()
                 else:
                     loss.backward()
+                    # Gradient norm (before clipping)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=float('inf'))
                     model_optim.step()
 
-            print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
+            epoch_cost = time.time() - epoch_time
+            print("Epoch: {} cost time: {}".format(epoch + 1, epoch_cost))
             train_loss = np.average(train_loss)
             vali_loss = self.vali(vali_data, vali_loader, criterion)
             test_loss = self.vali(test_data, test_loader, criterion)
@@ -238,18 +294,39 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
                 epoch + 1, train_steps, train_loss, vali_loss, test_loss))
 
+            # Get current lr
+            current_lr = model_optim.param_groups[0]['lr']
+
+            # Epoch-level wandb logging
+            self._log_wandb({
+                'epoch/train_loss': train_loss,
+                'epoch/vali_loss': vali_loss,
+                'epoch/test_loss': test_loss,
+                'epoch/learning_rate': current_lr,
+                'epoch/grad_norm': grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
+                'epoch/epoch_time_sec': epoch_cost,
+                'epoch/epoch': epoch + 1,
+            }, step=global_step)
+
             adjust_learning_rate(model_optim, epoch + 1, self.args)
             # We do not use early stopping
-            
+
             if vali_loss < best_valid_loss:
                 best_model = copy.deepcopy(self.model)
                 best_valid_loss = vali_loss
-                
+                self._log_wandb({
+                    'epoch/best_vali_loss': best_valid_loss,
+                    'epoch/best_epoch': epoch + 1,
+                }, step=global_step)
+
         best_model_path = path + '/' + 'checkpoint.pth'
         torch.save(best_model.state_dict(), best_model_path)
-#         self.model.load_state_dict(torch.load(best_model_path))
 
-#         return self.model
+        # Log final summary
+        self._log_wandb({
+            'summary/best_vali_loss': best_valid_loss,
+        })
+
         return best_model
 
     def test(self, setting, test=0):
@@ -333,6 +410,13 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         visual_with_retrieval(input_np[0], true[0], pred[0],
                                             ret_input_np, ret_output_np, name=vis_name)
 
+                        # Log test visualizations to wandb
+                        if self.use_wandb and i < 100:
+                            self._log_wandb({
+                                f'test/pred_vs_gt_{i}': self.wandb.Image(os.path.join(folder_path, f'{i}.png')),
+                                f'test/retrieval_{i}': self.wandb.Image(vis_name),
+                            })
+
         preds = np.concatenate(preds, axis=0)
         trues = np.concatenate(trues, axis=0)
         print('test shape:', preds.shape, trues.shape)
@@ -344,7 +428,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         folder_path = './results/' + setting + '/'
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
-        
+
         # dtw calculation
         if self.args.use_dtw:
             dtw_list = []
@@ -359,10 +443,20 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             dtw = np.array(dtw_list).mean()
         else:
             dtw = -999
-            
+
 
         mae, mse, rmse, mape, mspe = metric(preds, trues)
         print('mse:{}, mae:{}, dtw:{}'.format(mse, mae, dtw))
+
+        # Log test metrics to wandb
+        self._log_wandb({
+            'test/mse': mse,
+            'test/mae': mae,
+            'test/rmse': rmse,
+            'test/mape': mape,
+            'test/mspe': mspe,
+        })
+
         f = open("result_long_term_forecast.txt", 'a')
         f.write(setting + "  \n")
         f.write('mse:{}, mae:{}, dtw:{}'.format(mse, mae, dtw))
@@ -373,5 +467,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         np.save(folder_path + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
         np.save(folder_path + 'pred.npy', preds)
         np.save(folder_path + 'true.npy', trues)
+
+        # Finish wandb run
+        if self.use_wandb:
+            self.wandb.finish()
 
         return

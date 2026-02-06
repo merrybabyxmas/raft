@@ -1,0 +1,254 @@
+_wandb:
+    value:
+        cli_version: 0.24.2
+        e:
+            twr5awle7n4s2retkryirdsc7dg4d4ii:
+                args:
+                    - --data
+                    - ETTh2
+                    - --root_path
+                    - /home/dongwoo43/raft/raft/data/ETT-small/
+                    - --data_path
+                    - ETTh2.csv
+                    - --model
+                    - RAFT
+                    - --task_name
+                    - long_term_forecast
+                    - --features
+                    - M
+                    - --seq_len
+                    - "336"
+                    - --label_len
+                    - "48"
+                    - --pred_len
+                    - "96"
+                    - --use_wandb
+                codePath: run.py
+                codePathLocal: run.py
+                cpu_count: 32
+                cpu_count_logical: 64
+                cudaVersion: "12.8"
+                disk:
+                    /:
+                        total: "1967317549056"
+                        used: "1865270390784"
+                email: mw990909@gmail.com
+                executable: /home/dongwoo43/miniconda3/envs/raft_q/bin/python
+                git:
+                    commit: ee92d431245145fcb974f8e69ba833c6b0fde9e9
+                    remote: https://github.com/merrybabyxmas/raft.git
+                gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Blackwell
+                      cudaCores: 24064
+                      memoryTotal: "102641958912"
+                      name: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
+                      uuid: GPU-81b84f39-7d1b-680e-7912-180967b8bad3
+                host: mllab43-TRX40-DESIGNARE
+                memory:
+                    total: "134980689920"
+                os: Linux-5.4.0-212-generic-x86_64-with-glibc2.31
+                program: /home/dongwoo43/raft/raft/run.py
+                python: CPython 3.10.19
+                root: /home/dongwoo43/raft/raft
+                startedAt: "2026-02-06T17:06:24.885765Z"
+                writerId: twr5awle7n4s2retkryirdsc7dg4d4ii
+        m: []
+        python_version: 3.10.19
+        t:
+            "1":
+                - 1
+                - 5
+                - 41
+                - 53
+            "2":
+                - 1
+                - 5
+                - 41
+                - 53
+            "3":
+                - 2
+                - 13
+                - 16
+                - 61
+            "4": 3.10.19
+            "5": 0.24.2
+            "10":
+                - 20
+            "12": 0.24.2
+            "13": linux-x86_64
+activation:
+    value: gelu
+anomaly_ratio:
+    value: 0.25
+augmentation_ratio:
+    value: 0
+batch_size:
+    value: 32
+c_out:
+    value: 7
+channel_independence:
+    value: 1
+checkpoints:
+    value: ./checkpoints/
+d_conv:
+    value: 4
+d_ff:
+    value: 2048
+d_layers:
+    value: 1
+d_model:
+    value: 512
+data:
+    value: ETTh2
+data_path:
+    value: ETTh2.csv
+dec_in:
+    value: 7
+decomp_method:
+    value: moving_avg
+des:
+    value: test
+devices:
+    value: 0,1,2,3
+discdtw:
+    value: false
+discsdtw:
+    value: false
+distil:
+    value: true
+down_sampling_layers:
+    value: 0
+down_sampling_method:
+    value: null
+down_sampling_window:
+    value: 1
+dropout:
+    value: 0.1
+dtwwarp:
+    value: false
+e_layers:
+    value: 2
+embed:
+    value: timeF
+enc_in:
+    value: 7
+expand:
+    value: 2
+extra_tag:
+    value: ""
+factor:
+    value: 1
+features:
+    value: M
+freq:
+    value: h
+gpu:
+    value: 0
+inverse:
+    value: false
+is_training:
+    value: 1
+itr:
+    value: 1
+jitter:
+    value: false
+label_len:
+    value: 48
+learning_rate:
+    value: 0.0001
+loss:
+    value: MSE
+lradj:
+    value: type1
+magwarp:
+    value: false
+mask_rate:
+    value: 0.25
+model:
+    value: RAFT
+model_id:
+    value: temp
+moving_avg:
+    value: 25
+n_heads:
+    value: 8
+n_period:
+    value: 3
+num_kernels:
+    value: 6
+num_workers:
+    value: 10
+output_attention:
+    value: false
+p_hidden_dims:
+    value:
+        - 128
+        - 128
+p_hidden_layers:
+    value: 2
+patience:
+    value: 10
+permutation:
+    value: false
+pred_len:
+    value: 96
+randompermutation:
+    value: false
+root_path:
+    value: /home/dongwoo43/raft/raft/data/ETT-small/
+rotation:
+    value: false
+scaling:
+    value: false
+seasonal_patterns:
+    value: Monthly
+seed:
+    value: 0
+seg_len:
+    value: 48
+seq_len:
+    value: 336
+setting:
+    value: long_term_forecast_temp_RAFT_ETTh2_ftM_sl336_ll48_pl96_dm512_nh8_el2_dl1_df2048_expand2_dc4_fc1_ebtimeF_dtTrue_test_0
+shapedtwwarp:
+    value: false
+spawner:
+    value: false
+target:
+    value: OT
+task_name:
+    value: long_term_forecast
+timewarp:
+    value: false
+top_k:
+    value: 5
+topm:
+    value: 5
+train_epochs:
+    value: 10
+use_amp:
+    value: false
+use_dtw:
+    value: false
+use_gpu:
+    value: true
+use_multi_gpu:
+    value: false
+use_norm:
+    value: 1
+use_time_emb:
+    value: true
+use_trust_gate:
+    value: false
+use_wandb:
+    value: true
+wandb_project:
+    value: RAFT
+wdba:
+    value: false
+windowslice:
+    value: false
+windowwarp:
+    value: false

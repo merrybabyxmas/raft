@@ -208,7 +208,7 @@ class RetrievalTool():
         return retrievals
 
     def retrieve_with_indices(self, x, index, train=True):
-        """Retrieve predictions and return top-M indices for visualization."""
+        """Retrieve individual top-M patterns per period and return indices."""
         index = index.to(x.device)
 
         bsz, seq_len, channels = x.shape
@@ -238,23 +238,16 @@ class RetrievalTool():
         sim = sim.reshape(self.n_period * bsz, self.n_train) # G X B, T
 
         topm_index = torch.topk(sim, self.topm, dim=1).indices
-        ranking_sim = torch.ones_like(sim) * float('-inf')
-
-        rows = torch.arange(sim.size(0)).unsqueeze(-1).to(sim.device)
-        ranking_sim[rows, topm_index] = sim[rows, topm_index]
-
-        sim = sim.reshape(self.n_period, bsz, self.n_train) # G, B, T
-        ranking_sim = ranking_sim.reshape(self.n_period, bsz, self.n_train) # G, B, T
         topm_index_reshaped = topm_index.reshape(self.n_period, bsz, self.topm) # G, B, M
 
-        data_len, seq_len, channels = self.train_data_all.shape
-
-        ranking_prob = F.softmax(ranking_sim / self.temperature, dim=2)
-        ranking_prob = ranking_prob.detach().cpu() # G, B, T
-
-        y_data_all = self.y_data_all_mg.flatten(start_dim=2) # G, T, P * C
-
-        pred_from_retrieval = torch.bmm(ranking_prob, y_data_all).reshape(self.n_period, bsz, -1, channels)
+        # Gather individual top-m patterns from y_data_all_mg
+        # y_data_all_mg: [n_period, T, pred_len, C]
+        pred_from_retrieval = []
+        for g_idx in range(self.n_period):
+            indices = topm_index_reshaped[g_idx].cpu()  # [bsz, topm]
+            patterns = self.y_data_all_mg[g_idx][indices]  # [bsz, topm, pred_len, C]
+            pred_from_retrieval.append(patterns)
+        pred_from_retrieval = torch.stack(pred_from_retrieval)  # [n_period, bsz, topm, pred_len, C]
         pred_from_retrieval = pred_from_retrieval.to(x.device)
 
         # Return first period's top-M indices for visualization (B, M)

@@ -90,7 +90,7 @@ if __name__ == '__main__':
         help='Number of Periods'
     )
     parser.add_argument(
-        '--topm', type=int, default=1,
+        '--topm', type=int, default=5,
         help='Number of Retrievals'
     )
     parser.add_argument('--use_trust_gate', default=False, action='store_true',
@@ -144,6 +144,10 @@ if __name__ == '__main__':
     parser.add_argument('--discdtw', default=False, action="store_true", help="Discrimitive DTW warp preset augmentation")
     parser.add_argument('--discsdtw', default=False, action="store_true", help="Discrimitive shapeDTW warp preset augmentation")
     parser.add_argument('--extra_tag', type=str, default="", help="Anything extra")
+
+    # wandb
+    parser.add_argument('--use_wandb', default=False, action='store_true', help='Use wandb for logging')
+    parser.add_argument('--wandb_project', type=str, default='RAFT', help='wandb project name')
 
     args = parser.parse_args()
     # args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
