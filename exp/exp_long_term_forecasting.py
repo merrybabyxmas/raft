@@ -7,6 +7,7 @@ import torch.nn as nn
 from torch import optim
 import os
 import time
+from datetime import datetime
 import warnings
 import numpy as np
 import copy
@@ -62,7 +63,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
                 # encoder - decoder
                 if self.args.model == 'RAFT' or self.args.model == 'D_RAFT':
-                    outputs = self.model(batch_x, index, mode='valid')
+                    outputs = self.model(batch_x, index, mode='valid', x_mark=batch_x_mark)
                 else:
                     if self.args.use_amp:
                         with torch.cuda.amp.autocast():
@@ -135,7 +136,24 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
                 # encoder - decoder
                 if self.args.model == 'RAFT':
-                    f_pred, g_pred, patterns = self.model(batch_x, index, mode='train')
+                    f_pred, g_pred, patterns = self.model(batch_x, index, mode='train', x_mark=batch_x_mark)
+
+                    # Train visualization (first batch of each epoch)
+                    if i == 0:
+                        with torch.no_grad():
+                            batch_idx = self.model.retrieval_indices_dict['train'][index.cpu()]
+                            ret_in = self.model.x_data_source[batch_idx]   # [B, M, Seq, C]
+                            ret_out = self.model.y_data_source[batch_idx]  # [B, M, Pred, C]
+                        input_np = batch_x[0].detach().cpu().numpy()
+                        true_np = batch_y[0, -self.args.pred_len:, :].detach().cpu().numpy()
+                        pred_np = (f_pred[0] + g_pred[0]).detach().cpu().numpy()
+                        ret_input_np = ret_in[0].cpu().numpy()
+                        ret_output_np = ret_out[0].cpu().numpy()
+
+                        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                        vis_name = os.path.join(train_vis_path, f'train_epoch_{epoch+1}_batch_{i}_{ts}.png')
+                        visual_with_retrieval(input_np, true_np, pred_np,
+                                              ret_input_np, ret_output_np, name=vis_name)
 
                     f_dim = -1 if self.args.features == 'MS' else 0
                     f_pred = f_pred[:, -self.args.pred_len:, f_dim:]
@@ -172,7 +190,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         ret_input_np = retrieved_input[0].detach().cpu().numpy()
                         ret_output_np = retrieved_output[0].detach().cpu().numpy()
 
-                        vis_name = os.path.join(train_vis_path, f'train_epoch_{epoch+1}_batch_{i}.png')
+                        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                        vis_name = os.path.join(train_vis_path, f'train_epoch_{epoch+1}_batch_{i}_{ts}.png')
                         visual_with_retrieval(input_np, true_np, pred_np,
                                             ret_input_np, ret_output_np, name=vis_name)
                     else:
@@ -268,10 +287,10 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     # Get outputs with retrieved patterns for visualization
                     if i % 20 == 0:
                         outputs, retrieved_input, retrieved_output = self.model(
-                            batch_x, index, mode='test', return_patterns=True
+                            batch_x, index, mode='test', x_mark=batch_x_mark, return_patterns=True
                         )
                     else:
-                        outputs = self.model(batch_x, index, mode='test')
+                        outputs = self.model(batch_x, index, mode='test', x_mark=batch_x_mark)
                 else:
                     if self.args.use_amp:
                         with torch.cuda.amp.autocast():
@@ -304,13 +323,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         input_np = test_data.inverse_transform(input_np.reshape(shape[0] * shape[1], -1)).reshape(shape)
                     gt = np.concatenate((input_np[0, :, -1], true[0, :, -1]), axis=0)
                     pd_vis = np.concatenate((input_np[0, :, -1], pred[0, :, -1]), axis=0)
-                    visual(gt, pd_vis, os.path.join(folder_path, str(i) + '.png'))
+                    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    visual(gt, pd_vis, os.path.join(folder_path, f'{i}_{ts}.png'))
 
                     # Save retrieval visualization for RAFT models
                     if self.args.model == 'RAFT' or self.args.model == 'D_RAFT':
                         ret_input_np = retrieved_input[0].detach().cpu().numpy()
                         ret_output_np = retrieved_output[0].detach().cpu().numpy()
-                        vis_name = os.path.join(retrieval_vis_path, f'eval_sample_{i}.png')
+                        vis_name = os.path.join(retrieval_vis_path, f'eval_sample_{i}_{ts}.png')
                         visual_with_retrieval(input_np[0], true[0], pred[0],
                                             ret_input_np, ret_output_np, name=vis_name)
 

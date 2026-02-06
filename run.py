@@ -93,6 +93,10 @@ if __name__ == '__main__':
         '--topm', type=int, default=20,
         help='Number of Retrievals'
     )
+    parser.add_argument('--use_trust_gate', default=False, action='store_true',
+                        help='Use trust gate to weight residual network output')
+    parser.add_argument('--use_time_emb', default=True, action='store_true',
+                        help='Use time embedding in forecast')
 
     # optimization
     parser.add_argument('--num_workers', type=int, default=10, help='data loader num workers')

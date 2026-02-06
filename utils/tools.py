@@ -88,6 +88,7 @@ def visual(true, preds=None, name='./pic/test.png'):
         plt.plot(preds, label='Prediction', linewidth=2)
     plt.legend()
     plt.savefig(name, bbox_inches='tight')
+    plt.close()
 
 
 def adjustment(gt, pred):

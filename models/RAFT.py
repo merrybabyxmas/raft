@@ -9,72 +9,66 @@ class Model(nn.Module):
     Paper link: https://arxiv.org/pdf/2205.13504.pdf
     """
 
-    def __init__(self, configs, individual=False):
-        """
-        individual: Bool, whether shared model among different variates.
-        """
+    def __init__(self, configs):
         super(Model, self).__init__()
         self.device = torch.device(f'cuda:{configs.gpu}')
         self.task_name = configs.task_name
         self.seq_len = configs.seq_len
-        if self.task_name == 'classification' or self.task_name == 'anomaly_detection' or self.task_name == 'imputation':
-            self.pred_len = configs.seq_len
-        else:
-            self.pred_len = configs.pred_len
-        # Series decomposition block from Autoformer
-#         self.decompsition = series_decomp(configs.moving_avg)
-#         self.individual = individual
+        self.pred_len = configs.pred_len
         self.channels = configs.enc_in
-        
-        # G(Residual Net) - Additive Correction: G가 (Y - F)를 학습
-        # 입력: x_norm(Seq) + p_mean(Pred) + p_std(Pred) + f_pred(Pred) + residual_hint(Pred)
+        self.use_trust_gate = getattr(configs, 'use_trust_gate', False)
+        self.use_time_emb = getattr(configs, 'use_time_emb', False)
+
+        # --- Residual Network (G) 입력 차원 ---
+        # 입력: x_norm(Seq) + f_pred(Pred)
+        dim = self.seq_len + self.pred_len
+
         self.residual_net = nn.Sequential(
-            nn.Linear(dim, 512),       # 차원 확대
+            nn.Linear(dim, 512),
             nn.ReLU(),
-            nn.Dropout(0.1),           # 과적합 방지
-            nn.Linear(512, 256),       # 레이어 추가 (Deep)
+            nn.Dropout(0.1),
+            nn.Linear(512, 256),
             nn.ReLU(),
-            nn.Linear(256, pred_len)
+            nn.Linear(256, self.pred_len)
         )
+
+        # --- [추가] Trust Gate 정의 ---
+        if self.use_trust_gate:
+            self.trust_gate = nn.Sequential(
+                nn.Linear(self.pred_len, 128),
+                nn.ReLU(),
+                nn.Linear(128, self.pred_len),
+                nn.Sigmoid() # 0 ~ 1 사이의 신뢰도 가중치
+            )
         
+        # --- [추가] Time Embedding 관련 정의 ---
+        if self.use_time_emb:
+            mark_dim = configs.enc_in_mark if hasattr(configs, 'enc_in_mark') else 4
+            self.time_embedding = nn.Linear(mark_dim, configs.d_model)
+            self.time_projection = nn.Linear(configs.d_model, self.channels)
 
         self.linear_x = nn.Linear(self.seq_len, self.pred_len)
+        self.linear_pred = nn.Linear(2 * self.pred_len, self.pred_len)
         
+        # Retrieval 설정
         self.n_period = configs.n_period
         self.topm = configs.topm
-        
         self.rt = RetrievalTool(
-            seq_len=self.seq_len,
-            pred_len=self.pred_len,
-            channels=self.channels,
-            n_period=self.n_period,
-            topm=self.topm,
+            seq_len=self.seq_len, pred_len=self.pred_len,
+            channels=self.channels, n_period=self.n_period, topm=self.topm
         )
         
-        # pred_len으로 나누어떨어지는 period만 사용
+        # Period 관련 인덱스 계산 로직 (기존 유지)
         all_periods = self.rt.period_num[-1 * self.n_period:]
         self.period_num = [g for g in all_periods if self.pred_len % g == 0]
-        if len(self.period_num) == 0:
-            # 최소 1개는 있어야 함 (period=1은 항상 나누어떨어짐)
-            self.period_num = [1]
-
-        # retrieval 결과에서 필터링된 period에 해당하는 인덱스
+        if len(self.period_num) == 0: self.period_num = [1]
         self.period_indices = [i for i, g in enumerate(all_periods) if self.pred_len % g == 0]
-        if len(self.period_indices) == 0:
-            self.period_indices = [len(all_periods) - 1]  # 마지막 (가장 작은 period)
+        if len(self.period_indices) == 0: self.period_indices = [len(all_periods) - 1]
 
-        module_list = [
-            nn.Linear(self.pred_len // g, self.pred_len)
-            for g in self.period_num
-        ]
-        self.retrieval_pred = nn.ModuleList(module_list)
-        self.linear_pred = nn.Linear(2 * self.pred_len, self.pred_len)
-
-#         if self.task_name == 'classification':
-#             self.projection = nn.Linear(
-#                 configs.enc_in * configs.seq_len, configs.num_class)
-
-
+        self.retrieval_pred = nn.ModuleList([
+            nn.Linear(self.pred_len // g, self.pred_len) for g in self.period_num
+        ])
+        
     def prepare_dataset(self, train_data, valid_data, test_data):
         self.rt.prepare_dataset(train_data)
         self.retrieval_dict = {}
@@ -147,11 +141,17 @@ class Model(nn.Module):
 
         return pred
 
-    def forecast(self, x_enc, index, mode):
+    def forecast(self, x_enc, index, mode, x_mark=None):
         # 1. Main Network (F) 연산을 먼저 수행하여 베이스라인 생성
         x_offset = x_enc[:, -1:, :].detach()
         x_norm = x_enc - x_offset # [B, Seq, C]
-        
+
+        # Time Embedding: x_mark [B, Seq, mark_dim] -> [B, Seq, C]
+        if self.use_time_emb and x_mark is not None:
+            t_emb = self.time_embedding(x_mark)       # [B, Seq, d_model]
+            t_emb = self.time_projection(t_emb)        # [B, Seq, C]
+            x_norm = x_norm + t_emb
+
         # F의 예측 로직 (기존 RAFT 로직)
         x_pred_from_x = self.linear_x(x_norm.permute(0, 2, 1)).permute(0, 2, 1)
         pred_from_retrieval_all = self.retrieval_dict[mode][:, index.cpu()].to(self.device)
@@ -176,30 +176,29 @@ class Model(nn.Module):
         f_pred_norm = self.linear_pred(pred_combined.permute(0, 2, 1)).permute(0, 2, 1).reshape(bsz, self.pred_len, self.channels)
         f_pred = f_pred_norm + x_offset
 
-        # 2. 검색 패턴 및 통계량 획득
+        # 2. 검색 패턴 획득
         batch_indices = self.retrieval_indices_dict[mode][index.cpu()]
         patterns = self.y_data_source[batch_indices].to(self.device) # [B, M, Pred, C]
-        p_mean = patterns.mean(dim=1) 
-        p_std = patterns.std(dim=1)   
+
+        # Trust 계산
+        if self.use_trust_gate:
+            p_std = patterns.std(dim=1)
+            trust_score = self.trust_gate(p_std.permute(0, 2, 1)).permute(0, 2, 1) # [B, Pred, C]
+        else:
+            trust_score = None
 
         # 3. Residual Network (G) 계산 - Additive Correction
-        # residual_hint: 검색된 패턴 평균과 F 예측의 차이 (G가 학습할 방향 힌트)
-        residual_hint = p_mean - f_pred_norm.detach()
-
-        # g_input: x_norm(Seq) + p_mean(Pred) + p_std(Pred) + f_pred(Pred) + residual_hint(Pred)
+        # g_input: x_norm(Seq) + f_pred(Pred)
         g_input = torch.cat([
             x_norm.permute(0, 2, 1),
-            p_mean.permute(0, 2, 1),
-            p_std.permute(0, 2, 1),
             f_pred_norm.detach().permute(0, 2, 1),
-            residual_hint.permute(0, 2, 1)
-        ], dim=-1) # [B, C, Seq + 4*Pred]
+        ], dim=-1) # [B, C, Seq + Pred]
 
         # G 출력: (Y - F)를 예측
         g_pred = self.residual_net(g_input)
         g_pred = g_pred.permute(0, 2, 1)  # [B, Pred, C]
 
-        return f_pred, g_pred, patterns
+        return f_pred, g_pred, patterns, trust_score
 
     def imputation(self, x_enc, index, mode):
         # Encoder
@@ -219,13 +218,16 @@ class Model(nn.Module):
         output = self.projection(output)
         return output
 
-    def forward(self, x_enc, index, mode='train', return_patterns=False):
+    def forward(self, x_enc, index, mode='train', x_mark=None, return_patterns=False):
         if self.task_name == 'long_term_forecast':
-            f_pred, g_pred, patterns = self.forecast(x_enc, index, mode)
+            f_pred, g_pred, patterns, trust_score = self.forecast(x_enc, index, mode, x_mark)
 
-            # Apply Additive Correction: final = F + G
-            final_pred = f_pred + g_pred
-
+            # Apply Additive Correction
+            if trust_score is not None:
+                final_pred = f_pred + trust_score * g_pred
+            else:
+                final_pred = f_pred + g_pred
+            
             if mode != 'train':
                 if return_patterns:
                     # 시각화를 위해 검색된 입력/출력 패턴 반환
