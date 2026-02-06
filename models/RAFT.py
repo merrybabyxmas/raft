@@ -26,13 +26,15 @@ class Model(nn.Module):
 #         self.individual = individual
         self.channels = configs.enc_in
         
-        # G(Residual Net) 입력: x_norm(Seq) + p_mean(Pred) + p_std(Pred) + f_pred(Pred)
+        # G(Residual Net) - Additive Correction: G가 (Y - F)를 학습
+        # 입력: x_norm(Seq) + p_mean(Pred) + p_std(Pred) + f_pred(Pred) + residual_hint(Pred)
         self.residual_net = nn.Sequential(
-            nn.Linear(self.seq_len + 3 * self.pred_len, 256),
+            nn.Linear(dim, 512),       # 차원 확대
             nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(256, self.pred_len),
-            nn.Tanh()
+            nn.Dropout(0.1),           # 과적합 방지
+            nn.Linear(512, 256),       # 레이어 추가 (Deep)
+            nn.ReLU(),
+            nn.Linear(256, pred_len)
         )
         
 
@@ -49,8 +51,18 @@ class Model(nn.Module):
             topm=self.topm,
         )
         
-        self.period_num = self.rt.period_num[-1 * self.n_period:]
-        
+        # pred_len으로 나누어떨어지는 period만 사용
+        all_periods = self.rt.period_num[-1 * self.n_period:]
+        self.period_num = [g for g in all_periods if self.pred_len % g == 0]
+        if len(self.period_num) == 0:
+            # 최소 1개는 있어야 함 (period=1은 항상 나누어떨어짐)
+            self.period_num = [1]
+
+        # retrieval 결과에서 필터링된 period에 해당하는 인덱스
+        self.period_indices = [i for i, g in enumerate(all_periods) if self.pred_len % g == 0]
+        if len(self.period_indices) == 0:
+            self.period_indices = [len(all_periods) - 1]  # 마지막 (가장 작은 period)
+
         module_list = [
             nn.Linear(self.pred_len // g, self.pred_len)
             for g in self.period_num
@@ -75,8 +87,9 @@ class Model(nn.Module):
         print('Doing Test Retrieval')
         te_pred, te_idx = self.rt.retrieve_all_with_indices(test_data, train=False, device=self.device)
 
-        # Store source patterns (targets) for residual net stats
+        # Store source patterns for residual net stats and visualization
         self.y_data_source = self.rt.y_data_all
+        self.x_data_source = self.rt.train_data_all  # 입력 패턴 저장 (시각화용)
 
         del self.rt
         torch.cuda.empty_cache()
@@ -141,8 +154,11 @@ class Model(nn.Module):
         
         # F의 예측 로직 (기존 RAFT 로직)
         x_pred_from_x = self.linear_x(x_norm.permute(0, 2, 1)).permute(0, 2, 1)
-        pred_from_retrieval = self.retrieval_dict[mode][:, index.cpu()].to(self.device)
-        
+        pred_from_retrieval_all = self.retrieval_dict[mode][:, index.cpu()].to(self.device)
+
+        # 필터링된 period에 해당하는 retrieval 결과만 사용
+        pred_from_retrieval = pred_from_retrieval_all[self.period_indices]
+
         bsz = x_enc.shape[0]
         retrieval_pred_list = []
         for i, pr in enumerate(pred_from_retrieval):
@@ -166,16 +182,22 @@ class Model(nn.Module):
         p_mean = patterns.mean(dim=1) 
         p_std = patterns.std(dim=1)   
 
-        # 3. Residual Network (G) 계산: F의 결과를 입력에 포함!
-        # x_norm(Seq) + p_mean(Pred) + p_std(Pred) + f_pred_norm(Pred)
+        # 3. Residual Network (G) 계산 - Additive Correction
+        # residual_hint: 검색된 패턴 평균과 F 예측의 차이 (G가 학습할 방향 힌트)
+        residual_hint = p_mean - f_pred_norm.detach()
+
+        # g_input: x_norm(Seq) + p_mean(Pred) + p_std(Pred) + f_pred(Pred) + residual_hint(Pred)
         g_input = torch.cat([
             x_norm.permute(0, 2, 1),
             p_mean.permute(0, 2, 1),
             p_std.permute(0, 2, 1),
-            f_pred_norm.detach().permute(0, 2, 1) # F의 예측을 끊어서(detach) 입력
-        ], dim=-1) # [B, C, Seq + 3*Pred]
+            f_pred_norm.detach().permute(0, 2, 1),
+            residual_hint.permute(0, 2, 1)
+        ], dim=-1) # [B, C, Seq + 4*Pred]
 
-        g_pred = self.residual_net(g_input).permute(0, 2, 1) # [B, Pred, C]
+        # G 출력: (Y - F)를 예측
+        g_pred = self.residual_net(g_input)
+        g_pred = g_pred.permute(0, 2, 1)  # [B, Pred, C]
 
         return f_pred, g_pred, patterns
 
@@ -201,11 +223,18 @@ class Model(nn.Module):
         if self.task_name == 'long_term_forecast':
             f_pred, g_pred, patterns = self.forecast(x_enc, index, mode)
 
-            scaling_factor = 0.1
-            g_pred = g_pred * scaling_factor
-            # Apply Multiplicative Correction (F * (1 + G))
+            # Apply Additive Correction: final = F + G
+            final_pred = f_pred + g_pred
+
             if mode != 'train':
-                return f_pred * (1 + g_pred)
+                if return_patterns:
+                    # 시각화를 위해 검색된 입력/출력 패턴 반환
+                
+                    batch_indices = self.retrieval_indices_dict[mode][index.cpu()]
+                    retrieved_input = self.x_data_source[batch_indices]   # [B, M, Seq, C]
+                    retrieved_output = self.y_data_source[batch_indices]  # [B, M, Pred, C]
+                    return final_pred, retrieved_input, retrieved_output
+                return final_pred
 
             return f_pred, g_pred, patterns
         if self.task_name == 'imputation':

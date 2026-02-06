@@ -59,15 +59,27 @@ class RetrievalTool():
 
     def decompose_mg(self, data_all, remove_offset=True):
         data_all = copy.deepcopy(data_all) # T, S, C
+        seq_len = data_all.shape[1]
 
         mg = []
         for g in self.period_num:
-            cur = data_all.unfold(dimension=1, size=g, step=g).mean(dim=-1)
-            cur = cur.repeat_interleave(repeats=g, dim=1)
-            
+            # seq_len이 g로 나누어떨어지지 않으면 패딩 후 자르기
+            n_chunks = seq_len // g
+            if n_chunks == 0:
+                # period가 seq_len보다 크면 전체를 하나의 평균으로
+                cur = data_all.mean(dim=1, keepdim=True).repeat(1, seq_len, 1)
+            else:
+                usable_len = n_chunks * g
+                cur = data_all[:, :usable_len, :].unfold(dimension=1, size=g, step=g).mean(dim=-1)
+                cur = cur.repeat_interleave(repeats=g, dim=1)
+                # 남은 부분은 마지막 값으로 채움
+                if cur.shape[1] < seq_len:
+                    padding = cur[:, -1:, :].repeat(1, seq_len - cur.shape[1], 1)
+                    cur = torch.cat([cur, padding], dim=1)
+
             mg.append(cur)
 #             data_all = data_all - cur
-            
+
         mg = torch.stack(mg, dim=0) # G, T, S, C
 
         if remove_offset:

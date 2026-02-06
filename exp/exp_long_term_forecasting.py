@@ -142,14 +142,20 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     g_pred = g_pred[:, -self.args.pred_len:, f_dim:]
                     batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
 
-                    # Loss F: MSE
+                    # Loss F: MSE (Base Net이 Y를 직접 예측)
                     loss_f = criterion(f_pred, batch_y)
 
-                    # Loss G: Multiplicative Correction
-                    # Target G = (Y / F) - 1
-                    eps = 1e-5
-                    target_g = (batch_y / (f_pred.detach() + eps)) - 1
+                    # Loss G: Additive Correction
+                    # G는 F가 놓친 잔차(Y - F)를 학습
+                    target_g = batch_y - f_pred.detach()
+
                     loss_g = criterion(g_pred, target_g)
+
+                    # 디버깅: G의 출력 범위와 target 범위 확인
+                    if (i + 1) % 100 == 0:
+                        print(f"\t[DEBUG] g_pred range: [{g_pred.min().item():.3f}, {g_pred.max().item():.3f}], "
+                              f"target_g range: [{target_g.min().item():.3f}, {target_g.max().item():.3f}]")
+                        print(f"\t[DEBUG] loss_f: {loss_f.item():.4f}, loss_g: {loss_g.item():.4f}")
 
                     loss = loss_f + loss_g
 
@@ -187,6 +193,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     outputs = outputs[:, -self.args.pred_len:, f_dim:]
                     batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
                     loss = criterion(outputs, batch_y)
+
+                train_loss.append(loss.item())
 
                 if (i + 1) % 100 == 0:
                     print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
@@ -256,9 +264,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
                 # encoder - decoder
-                if self.args.model == 'RAFT':
-                    outputs = self.model(batch_x, index, mode='test')
-                elif self.args.model == 'D_RAFT':
+                if self.args.model == 'RAFT' or self.args.model == 'D_RAFT':
                     # Get outputs with retrieved patterns for visualization
                     if i % 20 == 0:
                         outputs, retrieved_input, retrieved_output = self.model(
@@ -301,7 +307,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     visual(gt, pd_vis, os.path.join(folder_path, str(i) + '.png'))
 
                     # Save retrieval visualization for RAFT models
-                    if self.args.model == 'D_RAFT':
+                    if self.args.model == 'RAFT' or self.args.model == 'D_RAFT':
                         ret_input_np = retrieved_input[0].detach().cpu().numpy()
                         ret_output_np = retrieved_output[0].detach().cpu().numpy()
                         vis_name = os.path.join(retrieval_vis_path, f'eval_sample_{i}.png')
